@@ -101,7 +101,7 @@ import { routeWorkspaceChanges } from './file-watching/route-workspace-changes';
 import {
   hasRegisteredFileWatcherSockets,
   notifyFileWatcherSocketsOfError,
-  registeredFileWatcherSockets,
+  registerFileWatcherSocket,
   removeRegisteredFileWatcherSocket,
 } from './file-watching/file-watcher-sockets';
 import {
@@ -335,7 +335,7 @@ async function handleMessage(socket: Socket, data: string) {
       mode
     );
   } else if (payload.type === 'REGISTER_FILE_WATCHER') {
-    registeredFileWatcherSockets.push({ socket, config: payload.config });
+    registerFileWatcherSocket({ socket, config: payload.config });
   } else if (isRegisterProjectGraphListenerMessage(payload)) {
     registeredProjectGraphListenerSockets.push(socket);
   } else if (isHandleGlobMessage(payload)) {
