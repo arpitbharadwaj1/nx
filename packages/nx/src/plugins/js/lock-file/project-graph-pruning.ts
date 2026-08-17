@@ -11,7 +11,10 @@ import { PackageJson } from '../../../utils/package-json';
 import { PackageManager } from '../../../utils/package-manager';
 import { workspaceRoot } from '../../../utils/workspace-root';
 import { parseDependencySpecifier } from '../utils/dependency-specifiers';
-import { getWorkspacePackagesFromGraph } from '../utils/get-workspace-packages-from-graph';
+import {
+  getWorkspacePackagesFromGraph,
+  resolveWorkspaceDependencyTarget,
+} from '../utils/get-workspace-packages-from-graph';
 import {
   normalizeLocalPathSpec,
   uncontainLocalPathSpec,
@@ -122,6 +125,22 @@ function normalizeDependencies(
         throw new Error(
           `Pruned lock file creation failed. "${packageName}": "${resolvedVersionRange}" does not match any workspace package.`
         );
+      }
+
+      // npm aliases can target a workspace package (matched under the same
+      // range-satisfaction policy the graph uses); those entries never resolve
+      // from the lock file and stay as-is. Aliases to registry packages fall
+      // through to the external lookups below.
+      if (
+        parsed.protocol === 'npm' &&
+        resolveWorkspaceDependencyTarget(
+          packageName,
+          resolvedVersionRange,
+          workspacePackages
+        ) !== null
+      ) {
+        combinedDependencies[packageName] = resolvedVersionRange;
+        return;
       }
 
       if (graph.externalNodes[`npm:${packageName}@${resolvedVersionRange}`]) {
@@ -282,6 +301,18 @@ export function addNodesAndDependencies(
         traverseWorkspaceNode(graph, builder, workspaceNode);
       }
       return;
+    }
+
+    if (parsed.protocol === 'npm') {
+      const target = resolveWorkspaceDependencyTarget(
+        name,
+        version,
+        workspacePackages
+      );
+      if (target !== null) {
+        traverseWorkspaceNode(graph, builder, workspacePackages.get(target));
+        return;
+      }
     }
 
     const node =
