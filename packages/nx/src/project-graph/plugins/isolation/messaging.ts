@@ -6,11 +6,11 @@ import { serialize } from '../../../daemon/socket-utils';
 import { MESSAGE_END_SEQ } from '../../../utils/consume-messages-from-socket';
 import { workspaceRoot } from '../../../utils/workspace-root';
 import type { LoadedNxPlugin } from '../loaded-nx-plugin';
+import type { StubbedPostTasksExecutionContext } from '../task-results-stub';
 import type {
   CreateDependenciesContext,
   CreateMetadataContext,
   CreateNodesContext,
-  PostTasksExecutionContext,
   PreTasksExecutionContext,
 } from '../public-api';
 import type {
@@ -127,7 +127,7 @@ type PluginMessageDefs = DefineMessages<{
 
   postTasksExecution: {
     payload: {
-      context: PostTasksExecutionContext;
+      context: StubbedPostTasksExecutionContext;
     };
     result:
       | {
