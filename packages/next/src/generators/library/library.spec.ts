@@ -107,6 +107,51 @@ describe('next library', () => {
     expect(packageJson.exports['./server'].default).toBe('./dist/server.js');
   });
 
+  it('should configure server entry point for buildable library with Rollup', async () => {
+    const appTree = createTreeWithEmptyWorkspace();
+    await libraryGenerator(appTree, {
+      directory: 'my-buildable-lib',
+      linter: 'eslint',
+      skipFormat: false,
+      skipTsConfig: false,
+      unitTestRunner: 'jest',
+      style: 'css',
+      component: true,
+      buildable: true,
+    });
+
+    const build = readProjectConfiguration(appTree, 'my-buildable-lib').targets
+      .build;
+    expect(build.executor).toBe('@nx/rollup:rollup');
+    expect(build.options.additionalEntryPoints).toEqual([
+      'my-buildable-lib/src/server.ts',
+    ]);
+    expect(build.options.generateExportsField).toBe(true);
+  });
+
+  it('should configure server entry point in the rollup config file when using the rollup plugin', async () => {
+    const appTree = createTreeWithEmptyWorkspace();
+    await libraryGenerator(appTree, {
+      directory: 'my-buildable-lib',
+      linter: 'eslint',
+      skipFormat: false,
+      skipTsConfig: false,
+      unitTestRunner: 'jest',
+      style: 'css',
+      component: true,
+      bundler: 'rollup',
+      addPlugin: true,
+    });
+
+    const rollupConfig = appTree.read(
+      'my-buildable-lib/rollup.config.cjs',
+      'utf-8'
+    );
+    expect(rollupConfig).toContain(`main: './src/index.ts',
+    additionalEntryPoints: ['./src/server.ts'],
+    generateExportsField: true,`);
+  });
+
   it('should generate a server-only entry point', async () => {
     const appTree = createTreeWithEmptyWorkspace();
 
@@ -376,6 +421,12 @@ describe('next library', () => {
               "types": "./dist/index.esm.d.ts",
               "import": "./dist/index.esm.js",
               "default": "./dist/index.esm.js"
+            },
+            "./server": {
+              "@proj/source": "./src/server.ts",
+              "types": "./dist/server.esm.d.ts",
+              "import": "./dist/server.esm.js",
+              "default": "./dist/server.esm.js"
             }
           },
           "nx": {
@@ -406,6 +457,9 @@ describe('next library', () => {
                       "input": ".",
                       "output": "."
                     }
+                  ],
+                  "additionalEntryPoints": [
+                    "mylib/src/server.ts"
                   ]
                 }
               },
@@ -425,6 +479,36 @@ describe('next library', () => {
           }
         }
         "
+      `);
+    });
+
+    it('should configure server entry point in the rollup config file when using the rollup plugin', async () => {
+      await libraryGenerator(tree, {
+        directory: 'mylib',
+        linter: 'eslint',
+        skipFormat: true,
+        skipTsConfig: false,
+        unitTestRunner: 'jest',
+        style: 'css',
+        component: false,
+        useProjectJson: false,
+        bundler: 'rollup',
+        addPlugin: true,
+      });
+
+      const rollupConfig = tree.read('mylib/rollup.config.cjs', 'utf-8');
+      expect(rollupConfig).toContain(`main: './src/index.ts',
+    additionalEntryPoints: ['./src/server.ts'],
+    outputPath:`);
+      expect(rollupConfig).not.toContain('generateExportsField');
+      expect(readJson(tree, 'mylib/package.json').exports['./server'])
+        .toMatchInlineSnapshot(`
+        {
+          "@proj/source": "./src/server.ts",
+          "default": "./dist/server.esm.js",
+          "import": "./dist/server.esm.js",
+          "types": "./dist/server.esm.d.ts",
+        }
       `);
     });
 
