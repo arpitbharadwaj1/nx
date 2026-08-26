@@ -20,6 +20,9 @@ jest.mock('./in-process-loader', () => ({
 jest.mock('./resolve-plugin', () => ({
   resetResolvePluginCache: jest.fn(),
 }));
+jest.mock('../../plugins/js/utils/register', () => ({
+  refreshSourceGraphResolvers: jest.fn(),
+}));
 
 describe('reasonToError', () => {
   it('should return the same Error instance when given a real Error', () => {
@@ -143,5 +146,19 @@ describe('getPluginsSeparated', () => {
     // resolution would be resolved against a stale project layout — missing
     // its own project — and collapse to the workspace root.
     expect(resetResolvePluginCache).toHaveBeenCalled();
+  });
+
+  it('refreshes source graph conditions when returning cached plugins', async () => {
+    const {
+      refreshSourceGraphResolvers,
+    } = require('../../plugins/js/utils/register');
+    const load = getPluginsSeparated({ plugins: ['test-a'] });
+    finishLoading('test-a');
+    await load;
+
+    refreshSourceGraphResolvers.mockClear();
+    await getPluginsSeparated({ plugins: ['test-a'] });
+
+    expect(refreshSourceGraphResolvers).toHaveBeenCalledTimes(1);
   });
 });
