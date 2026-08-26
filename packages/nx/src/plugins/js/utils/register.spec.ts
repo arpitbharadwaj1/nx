@@ -16,9 +16,21 @@ import {
 import * as typescriptUtils from './typescript';
 
 // Avoid a real swc registration side effect when exercising getTranspiler.
-jest.mock('@swc-node/register/register', () => ({
-  register: () => () => {},
-}));
+// The source loads this with a bare require (CJS channel), so stub the
+// require cache rather than vi.mock.
+import { createRequire, Module } from 'node:module';
+import {
+  mockCjsModule,
+  resetCjsMocks,
+} from '../../../internal-testing-utils/cjs-mock';
+{
+  const req = createRequire(import.meta.url);
+  const modPath = req.resolve('@swc-node/register/register');
+  const stub = new (Module as any)(modPath);
+  stub.exports = { register: () => () => {} };
+  stub.loaded = true;
+  req.cache[modPath] = stub;
+}
 
 describe('getTsNodeCompilerOptions', () => {
   it('should replace enum value with enum key for module', () => {
@@ -68,11 +80,10 @@ describe('isNativeStripPreferred', () => {
     });
   }
 
-  function loadIsNativeStripPreferred(): boolean {
+  async function loadIsNativeStripPreferred(): boolean {
     let result: boolean;
-    jest.isolateModules(() => {
-      result = require('./register').isNativeStripPreferred();
-    });
+    vi.resetModules();
+    result = (await import('./register')).isNativeStripPreferred();
     return result;
   }
 
@@ -85,65 +96,70 @@ describe('isNativeStripPreferred', () => {
     }
   });
 
-  it('prefers native strip when the runtime supports it', () => {
+  it('prefers native strip when the runtime supports it', async () => {
     setNativeTypescriptSupport('strip');
     delete process.env.NX_PREFER_TS_NODE;
     delete process.env.NX_PREFER_NODE_STRIP_TYPES;
-    expect(loadIsNativeStripPreferred()).toBe(true);
+    expect(await loadIsNativeStripPreferred()).toBe(true);
   });
 
-  it('does not prefer native strip when the runtime lacks support', () => {
+  it('does not prefer native strip when the runtime lacks support', async () => {
     setNativeTypescriptSupport(false);
     delete process.env.NX_PREFER_TS_NODE;
     delete process.env.NX_PREFER_NODE_STRIP_TYPES;
-    expect(loadIsNativeStripPreferred()).toBe(false);
+    expect(await loadIsNativeStripPreferred()).toBe(false);
   });
 
-  it('does not prefer native strip when NX_PREFER_NODE_STRIP_TYPES is false', () => {
+  it('does not prefer native strip when NX_PREFER_NODE_STRIP_TYPES is false', async () => {
     setNativeTypescriptSupport('strip');
     process.env.NX_PREFER_NODE_STRIP_TYPES = 'false';
-    expect(loadIsNativeStripPreferred()).toBe(false);
+    expect(await loadIsNativeStripPreferred()).toBe(false);
   });
 
-  it('does not prefer native strip when NX_PREFER_TS_NODE is true', () => {
+  it('does not prefer native strip when NX_PREFER_TS_NODE is true', async () => {
     setNativeTypescriptSupport('strip');
     process.env.NX_PREFER_TS_NODE = 'true';
     delete process.env.NX_PREFER_NODE_STRIP_TYPES;
-    expect(loadIsNativeStripPreferred()).toBe(false);
+    expect(await loadIsNativeStripPreferred()).toBe(false);
   });
 });
 
 describe('getTranspiler', () => {
+  // Each case swaps the lazily-required `typescript`; drop the swap afterwards
+  // so the doctored version does not leak into later tests in this file.
+  afterEach(() => {
+    resetCjsMocks();
+  });
+
   // TS6 requires the suppression flag to avoid hard-erroring on deprecated options.
-  it('sets ignoreDeprecations to "6.0" on TypeScript >= 6', () => {
-    jest.isolateModules(() => {
-      jest.doMock('typescript', () => ({
-        ...jest.requireActual('typescript'),
-        versionMajorMinor: '6.0',
-      }));
-      const { getTranspiler: fresh } =
-        require('./register') as typeof import('./register');
-      const opts: CompilerOptions = {};
-      fresh(opts);
-      expect(opts.ignoreDeprecations).toEqual('6.0');
+  it('sets ignoreDeprecations to "6.0" on TypeScript >= 6', async () => {
+    vi.resetModules();
+    // register.ts lazy-requires typescript (CJS channel); replace it there.
+    mockCjsModule(import.meta.url, 'typescript', {
+      ...require('typescript'),
+      versionMajorMinor: '6.0',
     });
-    jest.unmock('typescript');
+    const { getTranspiler: fresh } = (await import(
+      './register'
+    )) as typeof import('./register');
+    const opts: CompilerOptions = {};
+    fresh(opts);
+    expect(opts.ignoreDeprecations).toEqual('6.0');
   });
 
   // TS5 rejects the '6.0' value (TS5103) so the option must stay absent.
-  it('leaves ignoreDeprecations unset on TypeScript < 6', () => {
-    jest.isolateModules(() => {
-      jest.doMock('typescript', () => ({
-        ...jest.requireActual('typescript'),
-        versionMajorMinor: '5.9',
-      }));
-      const { getTranspiler: fresh } =
-        require('./register') as typeof import('./register');
-      const opts: CompilerOptions = {};
-      fresh(opts);
-      expect(opts.ignoreDeprecations).toBeUndefined();
+  it('leaves ignoreDeprecations unset on TypeScript < 6', async () => {
+    vi.resetModules();
+    mockCjsModule(import.meta.url, 'typescript', {
+      ...require('typescript'),
+      versionMajorMinor: '5.9',
     });
-    jest.unmock('typescript');
+    const { getTranspiler: fresh } = (await import(
+      './register'
+    )) as typeof import('./register');
+    const opts: CompilerOptions = {};
+    fresh(opts);
+    expect(opts.ignoreDeprecations).toBeUndefined();
   });
 });
 
@@ -321,19 +337,13 @@ describe('NodeNext ESM resolve hook (NODENEXT_ESM_RESOLVER_SOURCE)', () => {
 
   let resolve: ResolveHook;
 
-  beforeAll(() => {
-    // Exercise the exact shipped hook source. It's authored as an ESM module
-    // (registered as a `data:` module at runtime), so evaluate it as CommonJS
-    // here - Jest's VM can't honor a `data:` dynamic import without
-    // --experimental-vm-modules.
-    const cjs =
-      NODENEXT_ESM_RESOLVER_SOURCE.replace(
-        'export async function resolve',
-        'async function resolve'
-      ) + '\nmodule.exports = { resolve };';
-    const mod: { exports: { resolve?: ResolveHook } } = { exports: {} };
-    new Function('module', 'exports', cjs)(mod, mod.exports);
-    resolve = mod.exports.resolve!;
+  beforeAll(async () => {
+    // Load the shipped source through the same `data:` module `register()`
+    // builds, so the tests exercise what Node actually registers.
+    const mod = await import(
+      'data:text/javascript,' + encodeURIComponent(NODENEXT_ESM_RESOLVER_SOURCE)
+    );
+    resolve = mod.resolve;
   });
 
   const TS_PARENT = 'file:///ws/src/index.ts';
@@ -478,21 +488,20 @@ describe('NodeNext ESM resolve hook (nodeNextEsmResolveHook, sync)', () => {
 });
 
 describe('registerSourceGraphResolver', () => {
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => vi.restoreAllMocks());
 
   it('limits workspace conditions to imports from a tracked source graph', () => {
     const nodeModule = require('node:module') as typeof import('node:module');
-    const deregister = jest.fn();
+    const deregister = vi.fn();
     let resolveHook: Function;
-    jest
-      .spyOn(nodeModule, 'registerHooks')
-      .mockImplementation(({ resolve }) => {
-        resolveHook = resolve;
-        return { deregister };
-      });
-    jest
-      .spyOn(typescriptUtils, 'getRootTsConfigResolveExportsConditions')
-      .mockReturnValue(['source']);
+    vi.spyOn(nodeModule, 'registerHooks').mockImplementation(({ resolve }) => {
+      resolveHook = resolve;
+      return { deregister };
+    });
+    vi.spyOn(
+      typescriptUtils,
+      'getRootTsConfigResolveExportsConditions'
+    ).mockReturnValue(['source']);
 
     const cleanup = registerSourceGraphResolver(
       '/workspace/plugin.ts',
@@ -553,15 +562,14 @@ describe('registerSourceGraphResolver', () => {
   it('keeps the collection shape of the conditions it forwards', () => {
     const nodeModule = require('node:module') as typeof import('node:module');
     let resolveHook: Function;
-    jest
-      .spyOn(nodeModule, 'registerHooks')
-      .mockImplementation(({ resolve }) => {
-        resolveHook = resolve;
-        return { deregister: jest.fn() };
-      });
-    jest
-      .spyOn(typescriptUtils, 'getRootTsConfigResolveExportsConditions')
-      .mockReturnValue(['source']);
+    vi.spyOn(nodeModule, 'registerHooks').mockImplementation(({ resolve }) => {
+      resolveHook = resolve;
+      return { deregister: vi.fn() };
+    });
+    vi.spyOn(
+      typescriptUtils,
+      'getRootTsConfigResolveExportsConditions'
+    ).mockReturnValue(['source']);
 
     const cleanup = registerSourceGraphResolver(
       '/workspace/plugin.cjs',
@@ -608,13 +616,11 @@ describe('registerSourceGraphResolver', () => {
   it('refreshes conditions for a cached source graph', () => {
     const nodeModule = require('node:module') as typeof import('node:module');
     let resolveHook: Function;
-    jest
-      .spyOn(nodeModule, 'registerHooks')
-      .mockImplementation(({ resolve }) => {
-        resolveHook = resolve;
-        return { deregister: jest.fn() };
-      });
-    const conditions = jest
+    vi.spyOn(nodeModule, 'registerHooks').mockImplementation(({ resolve }) => {
+      resolveHook = resolve;
+      return { deregister: vi.fn() };
+    });
+    const conditions = vi
       .spyOn(typescriptUtils, 'getRootTsConfigResolveExportsConditions')
       .mockReturnValue(['source']);
 
@@ -626,7 +632,7 @@ describe('registerSourceGraphResolver', () => {
     conditions.mockReturnValue(['updated-source']);
     refreshSourceGraphResolvers('/workspace');
 
-    const nextResolve = jest.fn(() => ({
+    const nextResolve = vi.fn(() => ({
       url: 'file:///workspace/packages/utils/src/index.ts',
     }));
     resolveHook(

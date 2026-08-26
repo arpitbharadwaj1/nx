@@ -54,7 +54,7 @@ describe('getDaemonResolveConditionNodeArgs', () => {
     const registerHooks = nodeModule.registerHooks;
 
     try {
-      (nodeModule as any).registerHooks = jest.fn();
+      (nodeModule as any).registerHooks = vi.fn();
       expect(getDaemonResolveConditionNodeArgs(fs.tempDir)).toEqual([]);
 
       (nodeModule as any).registerHooks = undefined;

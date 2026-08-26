@@ -1,9 +1,10 @@
+import type { MockInstance } from 'vitest';
 const mocks = {
-  prompt: jest.fn(),
-  getInstalledNxVersion: jest.fn(),
-  getInstalledVersion: jest.fn(),
-  getInstalledPackageGroup: jest.fn(),
-  getInstalledLegacyNrwlWorkspaceVersion: jest.fn(),
+  prompt: vi.fn(),
+  getInstalledNxVersion: vi.fn(),
+  getInstalledVersion: vi.fn(),
+  getInstalledPackageGroup: vi.fn(),
+  getInstalledLegacyNrwlWorkspaceVersion: vi.fn(),
 };
 const mockPrompt = mocks.prompt;
 const mockGetInstalledNxVersion = mocks.getInstalledNxVersion;
@@ -11,10 +12,12 @@ const mockGetInstalledVersion = mocks.getInstalledVersion;
 const mockGetInstalledPackageGroup = mocks.getInstalledPackageGroup;
 const mockGetInstalledLegacyNrwlWorkspaceVersion =
   mocks.getInstalledLegacyNrwlWorkspaceVersion;
-jest.mock('enquirer', () => ({
-  prompt: (...args: any[]) => mocks.prompt(...args),
+vi.mock('@clack/prompts', () => ({
+  autocomplete: (...args: any[]) => mocks.prompt(...args),
+  text: (...args: any[]) => mocks.prompt(...args),
+  isCancel: () => false,
 }));
-jest.mock('../../utils/installed-nx-version', () => ({
+vi.mock('../../utils/installed-nx-version', () => ({
   getInstalledNxVersion: () => mocks.getInstalledNxVersion(),
   getInstalledVersion: (pkg: string) => mocks.getInstalledVersion(pkg),
   getInstalledPackageGroup: (pkg: string) =>
@@ -25,16 +28,15 @@ jest.mock('../../utils/installed-nx-version', () => ({
 // These tests exercise the migrate logic, not the cooldown wrapper: delegate the
 // policy-aware resolver to the legacy registry resolution so the existing
 // `resolvePackageVersionUsingRegistry` spies keep driving the assertions.
-jest.mock('./resolve-package-version', () => ({
+vi.mock('./resolve-package-version', () => ({
   isRegistryResolutionEnabled: () => true,
-  resolvePackageVersionRespectingMinReleaseAge: (
+  resolvePackageVersionRespectingMinReleaseAge: async (
     packageName: string,
     version: string
   ) =>
-    require('../../utils/package-manager').resolvePackageVersionUsingRegistry(
-      packageName,
-      version
-    ),
+    (
+      await import('../../utils/package-manager')
+    ).resolvePackageVersionUsingRegistry(packageName, version),
 }));
 import { resolveCatalogSpecifiers } from '../../utils/catalog';
 import * as configModule from '../../config/configuration';
@@ -69,6 +71,7 @@ import {
 import type { MigrateArgs } from './command-object';
 import { applyNxJsonMigrateDefaults } from './migrate-config';
 import { MinReleaseAgeViolationError } from '../../utils/min-release-age/errors';
+import { TempFs } from '../../internal-testing-utils/temp-fs';
 import {
   readPromptFilesFromInstall,
   validateMigrationEntries,
@@ -932,11 +935,11 @@ describe('Migration', () => {
 
     describe('--interactive', () => {
       beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
       });
 
       it('should prompt when --interactive and there is a package updates group with confirmation prompts', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: true }));
+        mockPrompt.mockReturnValue(Promise.resolve('Yes'));
         const promptMessage =
           'Do you want to update the packages related to <some fwk name>?';
         const migrator = new Migrator({
@@ -989,14 +992,14 @@ describe('Migration', () => {
           minVersionWithSkippedUpdates: undefined,
         });
         expect(mockPrompt).toHaveBeenCalledWith(
-          expect.arrayContaining([
-            expect.objectContaining({ message: promptMessage }),
-          ])
+          expect.objectContaining({
+            message: expect.stringContaining(promptMessage),
+          })
         );
       });
 
       it('should filter out updates when prompt answer is false', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: false }));
+        mockPrompt.mockReturnValue(Promise.resolve('No'));
         const migrator = new Migrator({
           packageJson: createPackageJson({
             dependencies: { child1: '1.0.0', child2: '1.0.0', child3: '1.0.0' },
@@ -1049,7 +1052,7 @@ describe('Migration', () => {
       });
 
       it('should not prompt and get all updates when --interactive=false', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: false }));
+        mockPrompt.mockReturnValue(Promise.resolve('No'));
         const migrator = new Migrator({
           packageJson: createPackageJson({
             dependencies: { child1: '1.0.0', child2: '1.0.0', child3: '1.0.0' },
@@ -1106,7 +1109,7 @@ describe('Migration', () => {
 
     describe('--include', () => {
       beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
       });
 
       it('should keep required packages and drop optional ones when include is required', async () => {
@@ -1153,7 +1156,7 @@ describe('Migration', () => {
       });
 
       it('should drop entries that contain only optional packages without firing their x-prompt', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: true }));
+        mockPrompt.mockReturnValue(Promise.resolve('Yes'));
         const migrator = new Migrator({
           packageJson: createPackageJson({
             dependencies: {
@@ -1311,7 +1314,7 @@ describe('Migration', () => {
 
     describe('requirements', () => {
       beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
       });
 
       it('should collect updates that meet requirements and leave out those that do not meet them', async () => {
@@ -1473,8 +1476,237 @@ describe('Migration', () => {
         });
       });
 
+      it('should re-evaluate held updates after later package groups satisfy their gates', async () => {
+        mockPrompt.mockResolvedValue('Yes');
+        const installedVersions = {
+          mypackage: '1.0.0',
+          'first-owner': '1.0.0',
+          'second-owner': '1.0.0',
+          'third-owner': '1.0.0',
+          blocker: '1.0.0',
+          'intermediate-blocker': '1.0.0',
+          result: '1.0.0',
+          'shared-result': '1.0.0',
+        };
+        const migrator = new Migrator({
+          packageJson: createPackageJson({
+            dependencies: installedVersions,
+          }),
+          getInstalledPackageVersion: (p) => installedVersions[p] ?? null,
+          fetch: (p): Promise<ResolvedMigrationConfiguration> => {
+            if (p === 'mypackage') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageGroup: [
+                  { package: 'first-owner', version: '*' },
+                  { package: 'second-owner', version: '*' },
+                  { package: 'third-owner', version: '*' },
+                ],
+              });
+            } else if (p === 'first-owner') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageJsonUpdates: {
+                  gated: {
+                    version: '2.0.0',
+                    'x-prompt': 'Apply held update?',
+                    incompatibleWith: { blocker: '<2.0.0' },
+                    packages: {
+                      result: { version: '2.0.0' },
+                      'shared-result': { version: '2.0.0' },
+                    },
+                  },
+                },
+              });
+            } else if (p === 'second-owner') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageJsonUpdates: {
+                  unblock: {
+                    version: '2.0.0',
+                    incompatibleWith: { 'intermediate-blocker': '<2.0.0' },
+                    packages: { blocker: { version: '2.0.0' } },
+                  },
+                },
+              });
+            } else if (p === 'third-owner') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageJsonUpdates: {
+                  unblock: {
+                    version: '2.0.0',
+                    requires: { mypackage: '>=2.0.0' },
+                    packages: {
+                      'intermediate-blocker': { version: '2.0.0' },
+                      'shared-result': { version: '3.0.0' },
+                    },
+                  },
+                },
+              });
+            }
+
+            return Promise.resolve({ version: '2.0.0' });
+          },
+          from: {},
+          to: {},
+          interactive: true,
+        });
+
+        const result = await migrator.migrate('mypackage', '2.0.0');
+
+        expect(result.packageUpdates).toEqual({
+          mypackage: { version: '2.0.0', addToPackageJson: false },
+          'first-owner': { version: '2.0.0', addToPackageJson: false },
+          'second-owner': { version: '2.0.0', addToPackageJson: false },
+          'third-owner': { version: '2.0.0', addToPackageJson: false },
+          blocker: { version: '2.0.0', addToPackageJson: false },
+          'intermediate-blocker': {
+            version: '2.0.0',
+            addToPackageJson: false,
+          },
+          result: { version: '2.0.0', addToPackageJson: false },
+          'shared-result': { version: '3.0.0', addToPackageJson: false },
+        });
+        expect(mockPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not re-prompt or apply a held update that was declined once its gate was satisfied', async () => {
+        mockPrompt.mockResolvedValue('No');
+        const installedVersions = {
+          mypackage: '1.0.0',
+          'gated-owner': '1.0.0',
+          'unblocker-owner': '1.0.0',
+          blocker: '1.0.0',
+          result: '1.0.0',
+        };
+        const migrator = new Migrator({
+          packageJson: createPackageJson({
+            dependencies: installedVersions,
+          }),
+          getInstalledPackageVersion: (p) => installedVersions[p] ?? null,
+          fetch: (p): Promise<ResolvedMigrationConfiguration> => {
+            if (p === 'mypackage') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageGroup: [
+                  { package: 'gated-owner', version: '*' },
+                  { package: 'unblocker-owner', version: '*' },
+                ],
+              });
+            } else if (p === 'gated-owner') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageJsonUpdates: {
+                  gated: {
+                    version: '2.0.0',
+                    'x-prompt': 'Apply held update?',
+                    incompatibleWith: { blocker: '<2.0.0' },
+                    packages: { result: { version: '2.0.0' } },
+                  },
+                },
+              });
+            } else if (p === 'unblocker-owner') {
+              return Promise.resolve({
+                version: '2.0.0',
+                packageJsonUpdates: {
+                  unblock: {
+                    version: '2.0.0',
+                    requires: { mypackage: '>=2.0.0' },
+                    packages: { blocker: { version: '2.0.0' } },
+                  },
+                },
+              });
+            }
+
+            return Promise.resolve({ version: '2.0.0' });
+          },
+          from: {},
+          to: {},
+          interactive: true,
+        });
+
+        const result = await migrator.migrate('mypackage', '2.0.0');
+
+        expect(result).toStrictEqual({
+          migrations: [],
+          packageUpdates: {
+            mypackage: { version: '2.0.0', addToPackageJson: false },
+            'gated-owner': { version: '2.0.0', addToPackageJson: false },
+            'unblocker-owner': { version: '2.0.0', addToPackageJson: false },
+            blocker: { version: '2.0.0', addToPackageJson: false },
+          },
+          minVersionWithSkippedUpdates: '2.0.0',
+        });
+        expect(mockPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('should keep the last metadata when a package is staged twice at the same version, gated or not', async () => {
+        const installedVersions = {
+          mypackage: '1.0.0',
+          gate: '2.0.0',
+          child: '1.0.0',
+        };
+        const createMigrator = (gated: boolean) =>
+          new Migrator({
+            packageJson: createPackageJson({
+              dependencies: installedVersions,
+            }),
+            getInstalledPackageVersion: (p) => installedVersions[p] ?? null,
+            fetch: (p): Promise<ResolvedMigrationConfiguration> => {
+              if (p === 'mypackage') {
+                return Promise.resolve({
+                  version: '2.0.0',
+                  packageJsonUpdates: {
+                    first: {
+                      version: '2.0.0',
+                      // Already satisfied: the gate only selects the code path,
+                      // it never holds the group.
+                      ...(gated ? { requires: { gate: '^2.0.0' } } : {}),
+                      packages: {
+                        child: {
+                          version: '2.0.0',
+                          addToPackageJson: 'dependencies',
+                        },
+                      },
+                    },
+                    second: {
+                      version: '2.0.0',
+                      ...(gated ? { requires: { gate: '^2.0.0' } } : {}),
+                      packages: {
+                        child: {
+                          version: '2.0.0',
+                          addToPackageJson: 'devDependencies',
+                          ignoreMigrations: true,
+                        },
+                      },
+                    },
+                  },
+                });
+              }
+
+              return Promise.resolve({ version: '2.0.0' });
+            },
+            from: {},
+            to: {},
+          });
+
+        const gated = await createMigrator(true).migrate('mypackage', '2.0.0');
+        const ungated = await createMigrator(false).migrate(
+          'mypackage',
+          '2.0.0'
+        );
+
+        const expected = {
+          version: '2.0.0',
+          addToPackageJson: 'devDependencies',
+          ignoreMigrations: true,
+        };
+        expect(gated.packageUpdates.child).toEqual(expected);
+        expect(ungated.packageUpdates.child).toEqual(expected);
+      });
+
       it('should prompt when requirements are met', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: true }));
+        mockPrompt.mockReturnValue(Promise.resolve('Yes'));
         const promptMessage =
           'Do you want to update the packages related to <some fwk name>?';
         const migrator = new Migrator({
@@ -1519,14 +1751,14 @@ describe('Migration', () => {
           minVersionWithSkippedUpdates: undefined,
         });
         expect(mockPrompt).toHaveBeenCalledWith(
-          expect.arrayContaining([
-            expect.objectContaining({ message: promptMessage }),
-          ])
+          expect.objectContaining({
+            message: expect.stringContaining(promptMessage),
+          })
         );
       });
 
       it('should not prompt when requirements are not met', async () => {
-        mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: true }));
+        mockPrompt.mockReturnValue(Promise.resolve('Yes'));
         const promptMessage =
           'Do you want to update the packages related to <some fwk name>?';
         const migrator = new Migrator({
@@ -1739,7 +1971,7 @@ describe('Migration', () => {
     });
 
     it('should not generate migrations for packages which confirmation prompt answer was false', async () => {
-      mockPrompt.mockReturnValue(Promise.resolve({ shouldApply: false }));
+      mockPrompt.mockReturnValue(Promise.resolve('No'));
       const migrator = new Migrator({
         packageJson: createPackageJson({
           dependencies: { child: '1.0.0', child2: '1.0.0' },
@@ -2384,7 +2616,7 @@ module.exports = {
         // Only an nx.json pin makes this observable: without it, bun's
         // lockfiles outrank yarn.lock in detection and the manifest is
         // skipped anyway.
-        const spy = jest
+        const spy = vi
           .spyOn(configModule, 'readNxJson')
           .mockReturnValue({ cli: { packageManager: 'yarn' } });
         try {
@@ -2481,7 +2713,7 @@ module.exports = {
         JSON.stringify({ name: 'nx', version: '23.4.0' })
       );
       // detectPackageManager reads nx.json, which throws on a malformed file.
-      const spy = jest
+      const spy = vi
         .spyOn(configModule, 'readNxJson')
         .mockImplementation(() => {
           throw new Error('Cannot parse nx.json');
@@ -2620,7 +2852,7 @@ module.exports = {
     });
 
     it('returns undefined rather than an ancestor version when the manifest locator throws a value that cannot be stringified', () => {
-      const verboseSpy = jest.spyOn(logger, 'verbose').mockImplementation();
+      const verboseSpy = vi.spyOn(logger, 'verbose').mockImplementation();
       try {
         const ws = join(root, 'ws');
         mkdirSync(ws, { recursive: true });
@@ -2772,7 +3004,7 @@ module.exports = {
     });
 
     it('logs the location that supplied the version', () => {
-      const verboseSpy = jest.spyOn(logger, 'verbose').mockImplementation();
+      const verboseSpy = vi.spyOn(logger, 'verbose').mockImplementation();
       try {
         mkdirSync(join(root, 'node_modules', 'nx'), { recursive: true });
         writeFileSync(
@@ -2847,7 +3079,7 @@ module.exports = {
       mockGetInstalledVersion.mockReset();
       mockGetInstalledPackageGroup.mockReset();
       mockGetInstalledLegacyNrwlWorkspaceVersion.mockReset();
-      jest.restoreAllMocks();
+      vi.restoreAllMocks();
       Object.defineProperty(process.stdin, 'isTTY', {
         value: originalStdinIsTTY,
         configurable: true,
@@ -2855,9 +3087,10 @@ module.exports = {
     });
 
     it('should work for generating migrations', async () => {
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockResolvedValue('12.3.0');
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockResolvedValue('12.3.0');
       const r = await parseMigrationsOptions({
         packageAndVersion: '8.12.0',
         from: '@myscope/a@12.3,@myscope/b@1.1.1',
@@ -3118,9 +3351,10 @@ module.exports = {
     });
 
     it('should default to nx@latest when no packageAndVersion is provided', async () => {
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockImplementation((pkg, version) => Promise.resolve(version));
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockImplementation((pkg, version) => Promise.resolve(version));
       const r = await parseMigrationsOptions({});
       expect(r).toMatchObject({
         type: 'generateMigrations',
@@ -3161,9 +3395,10 @@ module.exports = {
 
     it('should resolve the latest dist-tag up front for a bare invocation on v22+', async () => {
       mockGetInstalledNxVersion.mockReturnValue('22.0.0');
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockResolvedValue('23.1.0');
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockResolvedValue('23.1.0');
       const r = await parseMigrationsOptions({});
       expect(r).toMatchObject({
         type: 'generateMigrations',
@@ -3305,7 +3540,7 @@ module.exports = {
     });
 
     it('should handle different variations of the target package', async () => {
-      const packageRegistryViewSpy = jest
+      const packageRegistryViewSpy = vi
         .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
         .mockImplementation((pkg, version) => {
           return Promise.resolve(version);
@@ -3805,11 +4040,12 @@ module.exports = {
     });
 
     it('should handle backslashes in package names', async () => {
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockImplementation((pkg, version) => {
-          return Promise.resolve('12.3.0');
-        });
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockImplementation((pkg, version) => {
+        return Promise.resolve('12.3.0');
+      });
       const r = await parseMigrationsOptions({
         packageAndVersion: '@nx\\workspace@8.12.0',
         from: '@myscope\\a@12.3,@myscope\\b@1.1.1',
@@ -3934,8 +4170,8 @@ module.exports = {
         // `nx migrate <pkg>` hard-fail with a `--include` error the user never
         // passed. The overlay must carry it as a default, not a flag, and a
         // target that doesn't support optional updates must fall back to 'all' with a warning.
-        const warnSpy = jest
-          .spyOn(require('../../utils/output').output, 'warn')
+        const warnSpy = vi
+          .spyOn((await import('../../utils/output')).output, 'warn')
           .mockImplementation(() => {});
         const result = await parseMigrationsOptions(
           applyNxJsonMigrateDefaults(
@@ -3982,7 +4218,7 @@ module.exports = {
     beforeEach(() => {
       originalCi = process.env.CI;
       originalTty = process.stdin.isTTY;
-      jest.clearAllMocks();
+      vi.clearAllMocks();
     });
 
     afterEach(() => {
@@ -4091,7 +4327,7 @@ module.exports = {
         configurable: true,
       });
       process.env.CI = 'false';
-      mockPrompt.mockReturnValueOnce(Promise.resolve({ include: 'required' }));
+      mockPrompt.mockReturnValueOnce(Promise.resolve('required'));
       const result = await resolveInclude(
         undefined,
         supportsOptionalMigrationsContext
@@ -4106,10 +4342,10 @@ module.exports = {
         configurable: true,
       });
       process.env.CI = 'false';
-      mockPrompt.mockReturnValueOnce(Promise.resolve({ include: 'all' }));
+      mockPrompt.mockReturnValueOnce(Promise.resolve('all'));
       await resolveInclude(undefined, supportsOptionalMigrationsContext);
-      const choices = mockPrompt.mock.calls[0][0].choices;
-      expect(choices.map((c: { name: string }) => c.name)).toEqual([
+      const choices = mockPrompt.mock.calls[0][0].options;
+      expect(choices.map((c: { value: string }) => c.value)).toEqual([
         'required',
         'optional',
         'all',
@@ -4122,14 +4358,14 @@ module.exports = {
         configurable: true,
       });
       process.env.CI = 'false';
-      mockPrompt.mockReturnValueOnce(Promise.resolve({ include: 'all' }));
+      mockPrompt.mockReturnValueOnce(Promise.resolve('all'));
       await resolveInclude(undefined, {
         hasFrom: true,
         hasExcludeAppliedMigrations: false,
         targetSupportsOptionalUpdates: true,
       });
-      const choices = mockPrompt.mock.calls[0][0].choices;
-      expect(choices.map((c: { name: string }) => c.name)).toEqual([
+      const choices = mockPrompt.mock.calls[0][0].options;
+      expect(choices.map((c: { value: string }) => c.value)).toEqual([
         'required',
         'all',
       ]);
@@ -4141,14 +4377,14 @@ module.exports = {
         configurable: true,
       });
       process.env.CI = 'false';
-      mockPrompt.mockReturnValueOnce(Promise.resolve({ include: 'all' }));
+      mockPrompt.mockReturnValueOnce(Promise.resolve('all'));
       await resolveInclude(undefined, {
         hasFrom: false,
         hasExcludeAppliedMigrations: true,
         targetSupportsOptionalUpdates: true,
       });
-      const choices = mockPrompt.mock.calls[0][0].choices;
-      expect(choices.map((c: { name: string }) => c.name)).toEqual([
+      const choices = mockPrompt.mock.calls[0][0].options;
+      expect(choices.map((c: { value: string }) => c.value)).toEqual([
         'required',
         'all',
       ]);
@@ -4160,13 +4396,13 @@ module.exports = {
         configurable: true,
       });
       process.env.CI = 'false';
-      mockPrompt.mockReturnValueOnce(Promise.resolve({ include: 'all' }));
+      mockPrompt.mockReturnValueOnce(Promise.resolve('all'));
       await resolveInclude(undefined, {
         ...supportsOptionalMigrationsContext,
         interactive: true,
       });
-      const choices = mockPrompt.mock.calls[0][0].choices;
-      expect(choices.map((c: { name: string }) => c.name)).toEqual([
+      const choices = mockPrompt.mock.calls[0][0].options;
+      expect(choices.map((c: { value: string }) => c.value)).toEqual([
         'required',
         'all',
       ]);
@@ -4527,7 +4763,7 @@ module.exports = {
 
   describe('minimum-release-age violation propagation', () => {
     afterEach(() => {
-      jest.restoreAllMocks();
+      vi.restoreAllMocks();
     });
 
     function violation() {
@@ -4560,9 +4796,10 @@ module.exports = {
 
     it('the fetcher surfaces a cooldown violation instead of falling back to install', async () => {
       const err = violation();
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockRejectedValue(err);
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockRejectedValue(err);
       const fetch = createFetcher({} as any);
       await expect(fetch('mypackage', 'latest')).rejects.toBe(err);
     });
@@ -4570,10 +4807,11 @@ module.exports = {
     it('the fetcher rejects when an exact requested version comes back as a different version', async () => {
       // A config surface (registry proxy, override, cooldown gate) silently
       // substituting another version must fail the run, not corrupt the plan.
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockResolvedValue('2.0.1');
-      jest.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockResolvedValue('2.0.1');
+      vi.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
         JSON.stringify({
           dist: {
             tarball:
@@ -4588,10 +4826,11 @@ module.exports = {
     });
 
     it('the fetcher passes through tag and range specs that resolve to a different version', async () => {
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockResolvedValue('2.0.1');
-      jest.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockResolvedValue('2.0.1');
+      vi.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
         JSON.stringify({
           dist: {
             tarball:
@@ -4608,7 +4847,7 @@ module.exports = {
 
   describe('fetching migrations config from the registry', () => {
     afterEach(() => {
-      jest.restoreAllMocks();
+      vi.restoreAllMocks();
     });
 
     it.each([
@@ -4624,10 +4863,11 @@ module.exports = {
     ])(
       'reads a migration-less packument straight from %s',
       async (_label, host) => {
-        jest
-          .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-          .mockResolvedValue('2.0.1');
-        jest.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
+        vi.spyOn(
+          packageMgrUtils,
+          'resolvePackageVersionUsingRegistry'
+        ).mockResolvedValue('2.0.1');
+        vi.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
           JSON.stringify({
             dist: {
               tarball: `https://${host}/mypackage/-/mypackage-2.0.1.tgz`,
@@ -4648,10 +4888,11 @@ module.exports = {
     it('skips the tarball-host check when the package declares migration config', async () => {
       // The tarball host is off the allowlist on purpose, so only the declared
       // nx-migrations can skip the check.
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockResolvedValue('2.0.1');
-      jest.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockResolvedValue('2.0.1');
+      vi.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
         JSON.stringify({
           'nx-migrations': { packageGroup: ['mypackage-plugin'] },
           dist: {
@@ -4690,17 +4931,18 @@ module.exports = {
     ])(
       'falls back to install for a migration-less packument from %s',
       async (_label, host) => {
-        jest
-          .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-          .mockResolvedValue('2.0.1');
-        jest.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
+        vi.spyOn(
+          packageMgrUtils,
+          'resolvePackageVersionUsingRegistry'
+        ).mockResolvedValue('2.0.1');
+        vi.spyOn(packageMgrUtils, 'packageRegistryView').mockResolvedValue(
           JSON.stringify({
             dist: {
               tarball: `https://${host}/mypackage/-/mypackage-2.0.1.tgz`,
             },
           })
         );
-        jest.spyOn(packageMgrUtils, 'createTempNpmDirectory').mockReturnValue({
+        vi.spyOn(packageMgrUtils, 'createTempNpmDirectory').mockReturnValue({
           dir: join(tmpdir(), 'nx-migrate-spec-does-not-exist'),
           cleanup: async () => {},
         });
@@ -4765,7 +5007,7 @@ module.exports = {
       } else {
         delete (process.stdin as { isTTY?: boolean }).isTTY;
       }
-      jest.restoreAllMocks();
+      vi.restoreAllMocks();
     });
 
     function setTty(value: boolean) {
@@ -4776,21 +5018,22 @@ module.exports = {
     }
 
     function mockRegistry(map: { latest?: string } & Record<string, string>) {
-      jest
-        .spyOn(packageMgrUtils, 'resolvePackageVersionUsingRegistry')
-        .mockImplementation((_pkg, version) => {
-          const v = String(version);
-          if (v in map) return Promise.resolve(map[v]!);
-          const match = v.match(/^\^(\d+)\.0\.0$/);
-          if (match && map[match[1]]) return Promise.resolve(map[match[1]]!);
-          if (match) return Promise.reject(new Error('none'));
-          return Promise.resolve(v);
-        });
+      vi.spyOn(
+        packageMgrUtils,
+        'resolvePackageVersionUsingRegistry'
+      ).mockImplementation((_pkg, version) => {
+        const v = String(version);
+        if (v in map) return Promise.resolve(map[v]!);
+        const match = v.match(/^\^(\d+)\.0\.0$/);
+        if (match && map[match[1]]) return Promise.resolve(map[match[1]]!);
+        if (match) return Promise.reject(new Error('none'));
+        return Promise.resolve(v);
+      });
     }
 
-    function spyWarn() {
-      return jest
-        .spyOn(require('../../utils/output').output, 'warn')
+    async function spyWarn() {
+      return vi
+        .spyOn((await import('../../utils/output')).output, 'warn')
         .mockImplementation(() => {});
     }
 
@@ -4808,7 +5051,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '21.5.3' });
+      mockPrompt.mockResolvedValue('21.5.3');
 
       const r = await parseWithIncludes({
         packageAndVersion: 'next',
@@ -4817,13 +5060,11 @@ module.exports = {
 
       expect(mockPrompt).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: 'select',
-          name: 'chosen',
           message: 'How would you like to proceed?',
-          choices: expect.arrayContaining([
-            expect.objectContaining({ name: '21.5.3' }),
-            expect.objectContaining({ name: '22.5.3' }),
-            expect.objectContaining({ name: '23.1.0' }),
+          options: expect.arrayContaining([
+            expect.objectContaining({ value: '21.5.3' }),
+            expect.objectContaining({ value: '22.5.3' }),
+            expect.objectContaining({ value: '23.1.0' }),
           ]),
         })
       );
@@ -4841,7 +5082,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+      mockPrompt.mockResolvedValue('22.5.3');
 
       await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4849,8 +5090,8 @@ module.exports = {
       });
 
       const promptArgs = mockPrompt.mock.calls[0][0];
-      const choices = promptArgs.choices as { name: string }[];
-      expect(choices.map((c) => c.name)).toEqual(['22.5.3', '23.1.0']);
+      const choices = promptArgs.options as { value: string }[];
+      expect(choices.map((c) => c.value)).toEqual(['22.5.3', '23.1.0']);
     });
 
     it('should not include the current-major option when installed is on the latest minor of the current major but behind on patch', async () => {
@@ -4861,7 +5102,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+      mockPrompt.mockResolvedValue('22.5.3');
 
       await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4869,8 +5110,8 @@ module.exports = {
       });
 
       const promptArgs = mockPrompt.mock.calls[0][0];
-      const choices = promptArgs.choices as { name: string }[];
-      expect(choices.map((c) => c.name)).toEqual(['22.5.3', '23.1.0']);
+      const choices = promptArgs.options as { value: string }[];
+      expect(choices.map((c) => c.value)).toEqual(['22.5.3', '23.1.0']);
     });
 
     it('should omit the current-major (v22) step from the multi-major prompt', async () => {
@@ -4881,7 +5122,7 @@ module.exports = {
         '22': '22.5.3',
         '23': '23.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '23.5.3' });
+      mockPrompt.mockResolvedValue('23.5.3');
 
       await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4889,9 +5130,9 @@ module.exports = {
       });
 
       const promptArgs = mockPrompt.mock.calls[0][0];
-      const choices = promptArgs.choices as { name: string }[];
+      const choices = promptArgs.options as { value: string }[];
       // The 22.x current-major step is suppressed; only next-major and direct.
-      expect(choices.map((c) => c.name)).toEqual(['23.5.3', '24.1.0']);
+      expect(choices.map((c) => c.value)).toEqual(['23.5.3', '24.1.0']);
     });
 
     it('should keep --include=required valid when multi-major redirects to the next major (v22 install)', async () => {
@@ -4905,7 +5146,7 @@ module.exports = {
         '22': '22.5.3',
         '23': '23.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '23.5.3' });
+      mockPrompt.mockResolvedValue('23.5.3');
 
       const r = await parseWithIncludes({
         packageAndVersion: 'nx@24.0.0',
@@ -4925,8 +5166,8 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '21.5.3' });
-      const warnSpy = spyWarn();
+      mockPrompt.mockResolvedValue('21.5.3');
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'nx@23.1.0',
@@ -4941,7 +5182,7 @@ module.exports = {
     it('should warn (not prompt) in non-TTY environments', async () => {
       setTty(false);
       mockRegistry({ latest: '23.1.0' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4956,7 +5197,7 @@ module.exports = {
     it('should warn (not prompt) when --no-interactive is passed in a TTY', async () => {
       setTty(true);
       mockRegistry({ latest: '23.1.0' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4972,7 +5213,7 @@ module.exports = {
     it('should not prompt or warn when --multi-major-mode=direct is set', async () => {
       setTty(true);
       mockRegistry({ latest: '23.1.0' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -4989,7 +5230,7 @@ module.exports = {
       setTty(true);
       process.env.NX_MULTI_MAJOR_MODE = 'direct';
       mockRegistry({ latest: '23.1.0' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5008,7 +5249,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5029,7 +5270,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5048,7 +5289,7 @@ module.exports = {
       // Next-major lookup fails → next-major option dropped. Both unavailable.
       mockGetInstalledNxVersion.mockReturnValue('21.5.3');
       mockRegistry({ latest: '23.1.0', '21': '21.5.3' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5075,7 +5316,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5117,7 +5358,7 @@ module.exports = {
         '23': '23.5.3',
         '24': '24.5.3',
       });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'nx@23.0.0',
@@ -5133,7 +5374,7 @@ module.exports = {
     it('should not prompt or warn when delta is exactly 1 major', async () => {
       setTty(true);
       mockRegistry({ latest: '22.5.3' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5149,7 +5390,7 @@ module.exports = {
       setTty(true);
       mockGetInstalledNxVersion.mockReturnValue('13.10.0');
       mockRegistry({ latest: '23.1.0' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5164,7 +5405,7 @@ module.exports = {
     it('should not prompt or warn for --include=optional', async () => {
       setTty(true);
       mockGetInstalledNxVersion.mockReturnValue('23.0.0');
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({ include: 'optional' });
 
@@ -5186,7 +5427,7 @@ module.exports = {
           '21': '21.5.3',
           '22': '22.5.3',
         });
-        mockPrompt.mockResolvedValue({ chosen: '21.5.3' });
+        mockPrompt.mockResolvedValue('21.5.3');
 
         const r = await parseWithIncludes({
           packageAndVersion: positional,
@@ -5208,7 +5449,7 @@ module.exports = {
       // unavailable → fall back to warn.
       mockGetInstalledNxVersion.mockReturnValue('21.5.3');
       mockRegistry({ latest: '23.1.0', '21': '21.5.3' });
-      const warnSpy = spyWarn();
+      const warnSpy = await spyWarn();
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5247,7 +5488,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+      mockPrompt.mockResolvedValue('22.5.3');
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5267,7 +5508,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '23.1.0' });
+      mockPrompt.mockResolvedValue('23.1.0');
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5353,7 +5594,7 @@ module.exports = {
         '21': '21.5.3',
         '22': '22.5.3',
       });
-      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+      mockPrompt.mockResolvedValue('22.5.3');
 
       const r = await parseWithIncludes({
         packageAndVersion: 'latest',
@@ -5558,15 +5799,20 @@ module.exports = {
   });
 
   describe('generateMigrationsJsonAndUpdatePackageJson (--include=optional)', () => {
+    let tempFs: TempFs;
     let root: string;
 
     beforeEach(() => {
-      root = mkdtempSync(join(tmpdir(), 'nx-migrate-optional-'));
+      // TempFs, not a bare mkdtemp: this path formats the files it writes, and
+      // the formatter resolves config from the workspace root. Without moving
+      // the root, that resolution escapes into the real repo.
+      tempFs = new TempFs('nx-migrate-optional');
+      root = tempFs.tempDir;
       writeFileSync(join(root, 'nx.json'), JSON.stringify({}));
     });
 
     afterEach(() => {
-      rmSync(root, { recursive: true, force: true });
+      tempFs.cleanup();
     });
 
     // NXC-4590: under `--include=optional` the target package (e.g. `nx`) is in
@@ -6113,7 +6359,7 @@ module.exports = {
 
     describe('confirmCommitsOnDefaultBranch', () => {
       beforeEach(() => {
-        jest.clearAllMocks();
+        vi.clearAllMocks();
       });
 
       it('proceeds without prompting when the branch cannot be resolved', async () => {
@@ -6147,7 +6393,7 @@ module.exports = {
       });
 
       it('proceeds when the user confirms on the default branch', async () => {
-        mockPrompt.mockResolvedValue({ proceed: true });
+        mockPrompt.mockResolvedValue('Yes');
         await expect(
           confirmCommitsOnDefaultBranch({
             currentBranch: 'main',
@@ -6158,7 +6404,7 @@ module.exports = {
       });
 
       it('aborts when the user declines on the default branch', async () => {
-        mockPrompt.mockResolvedValue({ proceed: false });
+        mockPrompt.mockResolvedValue('No');
         await expect(
           confirmCommitsOnDefaultBranch({
             currentBranch: 'main',
@@ -6256,7 +6502,7 @@ module.exports = {
 
   describe('resolveMigrationForRun', () => {
     let tmpRoot: string;
-    let warnSpy: jest.SpyInstance;
+    let warnSpy: MockInstance;
 
     const writeInstalledPackage = (
       pkgName: string,
@@ -6287,7 +6533,7 @@ module.exports = {
       // realpath so the workspace-relative assertion isn't defeated by the
       // macOS /tmp -> /private/tmp symlink (require.resolve returns realpaths).
       tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), 'nx-migration-docs-')));
-      warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     });
 
     afterEach(() => {
