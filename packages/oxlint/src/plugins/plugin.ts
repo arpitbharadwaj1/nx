@@ -31,15 +31,10 @@ import {
 } from '@nx/js/internal';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import {
-  dirname as nativeDirname,
-  join as nativeJoin,
-  relative as nativeRelative,
-  sep as nativeSep,
-} from 'node:path';
+import { relative as nativeRelative, sep as nativeSep } from 'node:path';
 import { basename, dirname, join, normalize, sep } from 'node:path/posix';
 import { OXLINT_CONFIG_FILENAMES } from '../utils/config-file.js';
+import { resolveOxlintBin } from '../utils/oxlint-bin.js';
 
 export interface OxlintPluginOptions {
   targetName?: string;
@@ -659,8 +654,6 @@ function collectTsconfigChainsByProjectRoot(
   return result;
 }
 
-const localRequire = createRequire(import.meta.url);
-
 /**
  * Asks Oxlint itself which files it would lint. A glob cannot answer this:
  * Oxlint honours `ignorePatterns`, `.eslintignore` and `.gitignore`, including
@@ -674,19 +667,8 @@ const localRequire = createRequire(import.meta.url);
 function enumerateLintableFilesWithOxlint(
   workspaceRoot: string
 ): string[] | null {
-  let bin: string;
-  try {
-    bin = nativeJoin(
-      nativeDirname(
-        localRequire.resolve('oxlint/package.json', { paths: [workspaceRoot] })
-      ),
-      'bin',
-      'oxlint'
-    );
-  } catch {
-    return null;
-  }
-  if (!existsSync(bin)) {
+  const bin = resolveOxlintBin(workspaceRoot);
+  if (!bin) {
     return null;
   }
 
@@ -833,10 +815,6 @@ function getProjectUsingOxlintConfig(
     ),
   ];
 
-  const isRootProject = projectRoot === '.';
-  const lintPath =
-    isRootProject && standaloneSrcPath ? `./${standaloneSrcPath}` : '.';
-
   const jsPluginFiles = new Set(
     configInputs.flatMap((config) =>
       localJsPluginFiles(config, jsPluginSpecifiersByConfig.get(config) ?? [])
@@ -844,8 +822,11 @@ function getProjectUsingOxlintConfig(
   );
 
   const targetConfig: TargetConfiguration = {
-    command: `oxlint ${lintPath}`,
-    options: { cwd: projectRoot },
+    executor: '@nx/oxlint:lint',
+    // Every other project lints its root, the executor's default.
+    ...(standaloneSrcPath && {
+      options: { lintFilePatterns: [standaloneSrcPath] },
+    }),
     cache: true,
     inputs: [
       'default',

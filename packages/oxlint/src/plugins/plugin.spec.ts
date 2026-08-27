@@ -67,10 +67,10 @@ describe('@nx/oxlint plugin', () => {
     const results = await invokeCreateNodesOnMatchingFiles(context);
 
     expect(results.projects['libs/a'].targets.lint).toMatchObject({
-      command: 'oxlint .',
-      options: { cwd: 'libs/a' },
+      executor: '@nx/oxlint:lint',
       cache: true,
     });
+    expect(results.projects['libs/a'].targets.lint.options).toBeUndefined();
   });
 
   // Oxlint reports to stdout and has no output-file flag, so the task declares
@@ -276,12 +276,13 @@ describe('@nx/oxlint plugin', () => {
     const results = await invokeCreateNodesOnMatchingFiles(context);
 
     expect(results.projects['.'].targets.lint).toMatchObject({
-      command: 'oxlint ./src',
+      executor: '@nx/oxlint:lint',
+      options: { lintFilePatterns: ['src'] },
     });
   });
 
-  // Without the root short-circuit, `lintPath` falls through to `.` and the root
-  // project gets `oxlint .`, re-linting every sub-project on top of its own target.
+  // Without the root short-circuit the root project would lint `.`, re-linting
+  // every sub-project on top of its own target.
   it('should not give a root project a task when it has no src or lib', async () => {
     createFiles({
       '.oxlintrc.json': `{"rules":{}}`,
