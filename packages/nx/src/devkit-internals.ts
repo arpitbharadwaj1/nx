@@ -91,6 +91,7 @@ export {
 } from './plugins/js/utils/register';
 export { interpolate } from './tasks-runner/utils';
 export { isCI } from './utils/is-ci';
+export { createCliOptions } from './utils/create-cli-options';
 export {
   isUsingPrettierInTree,
   prettierConfigFiles,
@@ -161,7 +162,7 @@ export { getRelativeProjectJsonSchemaPath } from './generators/utils/project-con
 export { hashFile } from './hasher/file-hasher';
 export { filterUsingGlobPatterns, getTargetInputs } from './hasher/task-hasher';
 export type { JsonInput } from './native';
-export { killProcessTreeGraceful } from './native';
+export { isAiAgent, killProcessTreeGraceful } from './native';
 export { killChildOnHostExit } from './utils/kill-child-on-host-exit';
 export { connectToNxCloud } from './nx-cloud/generators/connect-to-nx-cloud/connect-to-nx-cloud';
 export type { NxCloudOnBoardingStatus } from './nx-cloud/models/onboarding-status';
