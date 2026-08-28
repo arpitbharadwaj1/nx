@@ -111,6 +111,10 @@ let cacheHasBeenPersisted = false;
  * (see spread.test.ts "middle plugin" flake).
  */
 function kickOffRecompute() {
+  // The daemon is long-lived: drop the cached tsconfig conditions at kickoff,
+  // not at commit, so a recompute that throws or loses the winner gate does
+  // not leave a stale read cached for a cycle.
+  clearRootTsConfigCustomConditionsCache();
   let myPromise: Promise<SerializedProjectGraph>;
   myPromise = (async () => {
     // Must resolve, never reject: kickOffRecompute() runs fire-and-forget, so
@@ -139,10 +143,7 @@ function kickOffRecompute() {
         cachedSerializedProjectGraphPromise === myPromise &&
         result.projectGraph
       ) {
-        // The daemon is long-lived: drop the cached tsconfig conditions and
-        // push this graph's package names to registered source-graph resolvers.
         const { nodes } = result.projectGraph;
-        clearRootTsConfigCustomConditionsCache();
         refreshSourceGraphResolvers(
           workspaceRoot,
           () =>
