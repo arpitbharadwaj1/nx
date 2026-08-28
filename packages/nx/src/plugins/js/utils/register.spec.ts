@@ -628,7 +628,7 @@ describe('registerSourceGraphResolver', () => {
       ['@proj/utils']
     );
     conditions.mockReturnValue(['updated-source']);
-    refreshSourceGraphResolvers('/workspace', ['@proj/new-package']);
+    refreshSourceGraphResolvers('/workspace', () => ['@proj/new-package']);
 
     const nextResolve = vi.fn(() => ({
       url: 'file:///workspace/packages/utils/src/index.ts',
@@ -648,5 +648,13 @@ describe('registerSourceGraphResolver', () => {
       expect.objectContaining({ conditions: ['node', 'updated-source'] })
     );
     cleanup();
+  });
+
+  it('skips the package-names thunk when no source graphs exist', () => {
+    const getWorkspacePackageNames = vi.fn(() => ['@proj/utils']);
+
+    refreshSourceGraphResolvers('/workspace', getWorkspacePackageNames);
+
+    expect(getWorkspacePackageNames).not.toHaveBeenCalled();
   });
 });
