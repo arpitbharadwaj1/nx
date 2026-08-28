@@ -156,9 +156,8 @@ describe('getPluginsSeparated', () => {
   });
 
   it('refreshes source graph conditions when returning cached plugins', async () => {
-    const { refreshSourceGraphResolvers } = await import(
-      '../../plugins/js/utils/register'
-    );
+    const { refreshSourceGraphResolvers } =
+      await import('../../plugins/js/utils/register');
     const load = getPluginsSeparated({ plugins: ['test-a'] });
     finishLoading('test-a');
     await load;
