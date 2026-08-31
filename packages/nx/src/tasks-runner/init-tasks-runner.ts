@@ -140,7 +140,12 @@ export async function runDiscreteTasks(
     }
   );
 
-  return [...batchResults, ...taskResults];
+  const results = [...batchResults, ...taskResults];
+  // Callers like Nx Cloud agents create an orchestrator per invocation in a
+  // long-lived process; release its process-level listeners once all tasks
+  // settle or every invocation's orchestrator stays reachable forever.
+  Promise.allSettled(results).then(() => orchestrator.dispose());
+  return results;
 }
 
 export async function runContinuousTasks(
@@ -157,11 +162,18 @@ export async function runContinuousTasks(
     nxJson,
     lifeCycle
   );
-  return tasks.reduce(
+  const runningTasks = tasks.reduce(
     (current, task, index) => {
       current[task.id] = orchestrator.startContinuousTask(task, index);
       return current;
     },
     {} as Record<string, Promise<RunningTask>>
   );
+  Promise.allSettled(
+    Object.values(runningTasks).map(async (promise) => {
+      const runningTask = await promise;
+      await new Promise<void>((res) => runningTask.onExit(() => res()));
+    })
+  ).then(() => orchestrator.dispose());
+  return runningTasks;
 }

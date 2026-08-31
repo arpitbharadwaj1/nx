@@ -869,4 +869,31 @@ describe('TaskOrchestrator', () => {
       expect(out).not.toContain('batch @nx/gradle:batch 2:2');
     });
   });
+
+  describe('process listener lifecycle', () => {
+    it('should remove on dispose() every process listener registered by setupSignalHandlers', () => {
+      const orchestrator: any = Object.create(TaskOrchestrator.prototype);
+      orchestrator.signalHandlers = [];
+      orchestrator.forkedProcessTaskRunner = {
+        removeProcessEventListeners: vi.fn(),
+      };
+      const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+      const before = Object.fromEntries(
+        signals.map((s) => [s, process.listenerCount(s)])
+      );
+
+      orchestrator.setupSignalHandlers();
+      for (const s of signals) {
+        expect(process.listenerCount(s)).toBe(before[s] + 1);
+      }
+
+      orchestrator.dispose();
+      for (const s of signals) {
+        expect(process.listenerCount(s)).toBe(before[s]);
+      }
+      expect(
+        orchestrator.forkedProcessTaskRunner.removeProcessEventListeners
+      ).toHaveBeenCalled();
+    });
+  });
 });

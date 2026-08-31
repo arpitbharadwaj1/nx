@@ -182,6 +182,7 @@ export class TaskOrchestrator {
   private discreteTaskExitHandled = new Map<string, Promise<void>>();
   private continuousTaskExitHandled = new Map<string, Promise<void>>();
   private cleanupPromise: Promise<void> | null = null;
+  private signalHandlers: Array<[NodeJS.Signals, () => void]> = [];
   // endregion internal state
 
   constructor(
@@ -274,6 +275,7 @@ export class TaskOrchestrator {
       this.cache.removeOldCacheRecords();
     }
     await this.cleanup();
+    this.dispose();
 
     // Public API (defaultTasksRunner) returns a plain object keyed by
     // task id. Internal state is a Map for faster lookup.
@@ -2104,9 +2106,22 @@ export class TaskOrchestrator {
         }
       });
     };
-    process.on('SIGINT', () => handleSignal('SIGINT'));
-    process.on('SIGTERM', () => handleSignal('SIGTERM'));
-    process.on('SIGHUP', () => handleSignal('SIGHUP'));
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+      const handler = () => handleSignal(signal);
+      this.signalHandlers.push([signal, handler]);
+      process.on(signal, handler);
+    }
+  }
+
+  // Releases the process-level listeners registered by setupSignalHandlers.
+  // Each closes over `this`, so a long-lived caller (an Nx Cloud agent creates
+  // an orchestrator per invocation) leaks whole orchestrators until they run.
+  dispose() {
+    for (const [signal, handler] of this.signalHandlers) {
+      process.off(signal, handler);
+    }
+    this.signalHandlers = [];
+    this.forkedProcessTaskRunner.removeProcessEventListeners();
   }
 
   private cleanUpUnneededContinuousTasks() {
